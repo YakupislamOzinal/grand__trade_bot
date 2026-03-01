@@ -1,15 +1,15 @@
-import os, asyncio, pandas as pd, yfinance as yf, feedparser, random, pytz, requests
-from datetime import datetime, timedelta
+import os, asyncio, pandas as pd, yfinance as yf, feedparser, random, pytz, requests, time
+from datetime import datetime
 from threading import Thread
 from flask import Flask
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
-# --- RENDER KEEP-ALIVE ---
+# --- RENDER WEB SERVER (main.py'den) ---
 app = Flask('')
 @app.route('/')
-def home(): return "Grand Trade Bot V8.0 Ultimate Online!"
+def home(): return "Grand Trade Bot V9.0 - Hibrit Sistem Aktif!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -24,10 +24,10 @@ BOT_ALIVE = False
 LOG_FILE = "islem_gecmisi.csv"
 COINS = ["BTC-USD", "ETH-USD", "SOL-USD"]
 pozisyonlar = {coin: {"miktar": 0, "alis_fiyati": 0} for coin in COINS}
-toplam_cuzdan = 1000.0
-seen_news_ids = set()
+toplam_cuzdan = 1000.0 # Başlangıç Bakiyesi
+seen_ids = set()
 
-# --- 35 STRATEJİK HESAP ---
+# --- 35 HESAP & 50 KELİME (Tam Liste) ---
 KULLANICILAR = [
     "elonmusk", "binance", "cz_binance", "VitalikButerin", "Whale_Alert", "WatcherGuru", 
     "DeItaone", "BNONews", "spectatorindex", "unusual_whales", "zerohedge", "reuters", 
@@ -37,7 +37,6 @@ KULLANICILAR = [
     "AltcoinDailyio", "crypto", "Glassnode", "Santimentfeed"
 ]
 
-# --- 50 KRİTİK KELİME ---
 KRITIK_KELIMELER = [
     "war", "attack", "missile", "explosion", "nuclear", "fed", "inflation", "cpi", 
     "interest rate", "hike", "cut", "recession", "bull", "bear", "pump", "dump", 
@@ -48,124 +47,120 @@ KRITIK_KELIMELER = [
     "banned", "lawsuit", "settlement"
 ]
 
-NITTER_INSTANCES = ["https://nitter.net-fi.de", "https://nitter.privacydev.net", "https://nitter.unixfox.eu"]
+NITTER_INSTANCES = [
+    "https://nitter.net-fi.de", "https://nitter.privacydev.net", 
+    "https://nitter.mint.lgbt", "https://nitter.unixfox.eu", "https://nitter.perennialte.ch"
+]
 
-# --- EK ÖZELLİKLER VE FONKSİYONLAR ---
-def get_fear_greed():
+# --- YARDIMCI FONKSİYONLAR ---
+def islem_kaydet(coin, tip, fiyat, bakiye, neden):
+    zaman = datetime.now(TR).strftime('%Y-%m-%d %H:%M:%S')
+    if not os.path.isfile(LOG_FILE):
+        with open(LOG_FILE, "w") as f: f.write("Zaman,Coin,Tip,Fiyat,Bakiye,Neden\n")
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{zaman},{coin},{tip},{fiyat},{bakiye},{neden}\n")
+
+def pivot_hesapla(coin):
     try:
-        r = requests.get("https://api.alternative.me/fng/").json()
-        return f"{r['data'][0]['value']} ({r['data'][0]['value_classification']})"
-    except: return "Alınamadı"
-
-def islem_kaydet(coin, tip, fiyat, miktar, pnl=0):
-    tarih = datetime.now(TR).strftime('%Y-%m-%d %H:%M:%S')
-    df = pd.DataFrame([[tarih, coin, tip, fiyat, miktar, pnl]], 
-                      columns=['Tarih', 'Coin', 'Tip', 'Fiyat', 'Miktar', 'PNL'])
-    df.to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False)
-
-def pivot_hesapla(df):
-    h, l, c = df['High'].iloc[-2], df['Low'].iloc[-2], df['Close'].iloc[-2]
-    p = (h + l + c) / 3
-    return {"Pivot": p, "R1": (2*p)-l, "R2": p+(h-l), "S1": (2*p)-h}
+        df = yf.download(coin, period="2d", interval="1h", progress=False)
+        h, l, c = df['High'].iloc[-2], df['Low'].iloc[-2], df['Close'].iloc[-2]
+        p = (h + l + c) / 3
+        return {"Pivot": p, "R1": (2*p)-l, "R2": p+(h-l), "S1": (2*p)-h}
+    except: return None
 
 # --- TELEGRAM KOMUTLARI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BOT_ALIVE
     BOT_ALIVE = True
-    await update.message.reply_text("👑 **Grand Trade V8.0 Başlatıldı!**\n\n35 Hesap ve 50 Kelime aktif olarak taranıyor.\n/help ile tüm yeteneklerimi gör.")
+    await update.message.reply_text("🚀 <b>V9.0 Hibrit Sistem Devrede!</b>\n\n35 Hesap, 50 Kelime ve Pivot Trade Algoritması eşzamanlı çalışıyor.", parse_mode=ParseMode.HTML)
 
 async def portfoy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    fng = get_fear_greed()
-    msg = f"📊 **Portföy & Piyasa**\n💰 Bakiye: ${toplam_cuzdan:.2f}\n😨 Korku Endeksi: {fng}\n\n"
+    msg = f"💰 <b>Güncel Durum</b>\nNakit: ${toplam_cuzdan:,.2f}\n\n"
     for c, p in pozisyonlar.items():
         if p['miktar'] > 0: msg += f"• {c}: {p['miktar']:.4f} (@{p['alis_fiyati']})\n"
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-async def weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not os.path.exists(LOG_FILE): return await update.message.reply_text("Veri yok.")
-    df = pd.read_csv(LOG_FILE)
-    total_pnl = df['PNL'].sum()
-    win_rate = (len(df[df['PNL'] > 0]) / len(df[df['Tip'] == "SATIM"])) * 100 if len(df[df['Tip'] == "SATIM"]) > 0 else 0
-    msg = (f"📅 **HAFTALIK PERFORMANS**\n"
-           f"💵 Net Kâr: ${total_pnl:.2f}\n"
-           f"🎯 Başarı Oranı: %{win_rate:.1f}\n"
-           f"📝 Toplam İşlem: {len(df)}")
-    await update.message.reply_text(msg)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 async def news_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.lower()
-    await update.message.reply_text(f"🔍 '{query}' taranıyor...")
+    await update.message.reply_text(f"🔍 <b>'{query}'</b> için küresel ağ taranıyor...", parse_mode=ParseMode.HTML)
     ins = random.choice(NITTER_INSTANCES)
     try:
         feed = feedparser.parse(f"{ins}/search/rss?q={query}")
         if feed.entries:
-            for e in feed.entries[:3]: await update.message.reply_text(f"📰 {e.title}\n{e.link}")
-        else: await update.message.reply_text("Sonuç bulunamadı.")
-    except: await update.message.reply_text("Haber servisi şu an meşgul.")
+            for e in feed.entries[:3]:
+                await update.message.reply_text(f"📰 <b>{e.title}</b>\n<a href='{e.link}'>Habere Git</a>", parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(f"❌ '{query}' ile ilgili sonuç bulunamadı.")
+    except:
+        await update.message.reply_text("⚠️ Sunucu meşgul, tekrar deneyin.")
 
-# --- ANA DÖNGÜLER ---
-async def hourly_analysis(context: ContextTypes.DEFAULT_TYPE):
+# --- ANA MOTOR (TRADE & HABER) ---
+async def hourly_report(context: ContextTypes.DEFAULT_TYPE):
     if not BOT_ALIVE: return
-    msg = "📉 **SAATLİK TEKNİK ANALİZ**\n"
+    msg = "📍 <b>Saatlik Hedef Raporu</b>\n"
     for coin in COINS:
-        try:
-            df = yf.download(coin, period="2d", interval="1h", progress=False)
-            sv = pivot_hesapla(df)
-            msg += f"\n*{coin}:* ${df['Close'].iloc[-1]:.2f}\n   🚧 R1: {sv['R1']:.2f} | ✅ S1: {sv['S1']:.2f}\n"
-        except: continue
-    await context.bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.MARKDOWN)
+        sv = pivot_hesapla(coin)
+        if sv:
+            msg += f"\n🪙 <b>{coin}:</b>\n🎯 Hedef (R2): {sv['R2']:.2f}\n🛡️ Destek (S1): {sv['S1']:.2f}\n"
+    await context.bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
 
 async def main_engine(context: ContextTypes.DEFAULT_TYPE):
     global BOT_ALIVE, toplam_cuzdan
     if not BOT_ALIVE: return
 
-    # 1. TRADE & VOLATİLİTE KONTROLÜ
+    # 1. TRADE ALGORİTMASI (main.py'den)
     for coin in COINS:
         try:
-            df = yf.download(coin, period="2d", interval="1h", progress=False)
+            df = yf.download(coin, period="1d", interval="1m", progress=False)
+            if df.empty: continue
             fiyat = df['Close'].iloc[-1]
-            sv = pivot_hesapla(df)
+            sv = pivot_hesapla(coin)
             pos = pozisyonlar[coin]
 
-            if pos['miktar'] == 0 and fiyat > sv['R1']:
-                miktar = (toplam_cuzdan / len(COINS)) / fiyat
-                toplam_cuzdan -= (toplam_cuzdan / len(COINS))
-                pozisyonlar[coin] = {"miktar": miktar, "alis_fiyati": fiyat}
-                islem_kaydet(coin, "ALIM", fiyat, miktar)
-                await context.bot.send_message(CHAT_ID, f"🟢 **ALIM:** {coin} @ ${fiyat:.2f}")
+            if pos["miktar"] == 0 and toplam_cuzdan > 10:
+                # R1 Kırılımı + %0.6 Marj Kontrolü
+                if fiyat > sv["R1"] and (sv["R2"] - fiyat)/fiyat > 0.006:
+                    islem_miktari = (toplam_cuzdan * 0.999) / fiyat
+                    pozisyonlar[coin] = {"miktar": islem_miktari, "alis_fiyati": fiyat}
+                    toplam_cuzdan = 0
+                    islem_kaydet(coin, "ALIM", fiyat, 0, "R1 Kırılımı")
+                    await context.bot.send_message(CHAT_ID, f"🔵 <b>İŞLEME GİRİLDİ: {coin}</b>\n📉 Alış: ${fiyat:,.2f}\n🎯 Hedef R2: ${sv['R2']:,.2f}", parse_mode=ParseMode.HTML)
 
-            elif pos['miktar'] > 0:
-                pnl = (fiyat - pos['alis_fiyati']) / pos['alis_fiyati']
-                if fiyat >= sv['R2'] or pnl <= -0.015:
-                    kazanc = (pos['miktar'] * fiyat) * 0.999
-                    islem_kaydet(coin, "SATIM", fiyat, pos['miktar'], kazanc - (pos['miktar']*pos['alis_fiyati']))
-                    toplam_cuzdan += kazanc
+            elif pos["miktar"] > 0:
+                pnl = (fiyat - pos["alis_fiyati"]) / pos["alis_fiyati"]
+                if fiyat >= sv["R2"] or pnl <= -0.015:
+                    toplam_cuzdan = (pos["miktar"] * fiyat) * 0.999
+                    islem_kaydet(coin, "SATIS", fiyat, toplam_cuzdan, "Hedef/Stop")
                     pozisyonlar[coin] = {"miktar": 0, "alis_fiyati": 0}
-                    await context.bot.send_message(CHAT_ID, f"🔴 **SATIM:** {coin} | PNL: %{pnl*100:.2f}")
+                    emoji = "💰" if pnl > 0 else "📉"
+                    await context.bot.send_message(CHAT_ID, f"{emoji} <b>POZİSYON KAPANDI: {coin}</b>\nNet PNL: %{pnl*100:.2f}\n💵 Bakiye: ${toplam_cuzdan:,.2f}", parse_mode=ParseMode.HTML)
         except: continue
 
-    # 2. 35 HESAP & 50 KELİME TARAMASI
-    for user in random.sample(KULLANICILAR, 5): # Her döngüde rastgele 5 hesap (Rate limit için)
+    # 2. İSTİHBARAT DÖNGÜSÜ (main (1).py'den)
+    for user in random.sample(KULLANICILAR, 5):
+        ins = random.choice(NITTER_INSTANCES)
         try:
-            feed = feedparser.parse(f"{random.choice(NITTER_INSTANCES)}/{user}/rss")
-            for e in feed.entries[:2]:
-                if e.link not in seen_news_ids:
-                    if any(k in e.title.lower() for k in KRITIK_KELIMELER):
-                        await context.bot.send_message(CHAT_ID, f"🚨 **KRİTİK (@{user}):**\n{e.title}\n[Oku]({e.link})", parse_mode=ParseMode.MARKDOWN)
-                    seen_news_ids.add(e.link)
+            url = f"{ins}/{user}/rss"
+            feed = await asyncio.get_event_loop().run_in_executor(None, lambda: feedparser.parse(url))
+            for entry in feed.entries[:2]:
+                if entry.link not in seen_ids:
+                    if any(k in entry.title.lower() for k in KRITIK_KELIMELER):
+                        msg = f"🚨 <b>İstihbarat: @{user}</b>\n{entry.title}\n<a href='{entry.link}'>Detaylar</a>"
+                        await context.bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                    seen_ids.add(entry.link)
         except: continue
 
-# --- RUN ---
+# --- BAŞLATICI ---
 if __name__ == '__main__':
     Thread(target=run_web, daemon=True).start()
     application = ApplicationBuilder().token(TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("portfoy", portfoy))
-    application.add_handler(CommandHandler("report", weekly_report))
+    application.add_handler(CommandHandler("report", lambda u,c: u.message.reply_text("Rapor CSV'ye kaydediliyor...")))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), news_search))
 
-    application.job_queue.run_repeating(hourly_analysis, interval=3600, first=10)
+    application.job_queue.run_repeating(hourly_report, interval=3600, first=10)
     application.job_queue.run_repeating(main_engine, interval=300, first=60)
 
     application.run_polling()
