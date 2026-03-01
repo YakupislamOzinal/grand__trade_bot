@@ -1,0 +1,8 @@
+python-telegram-bot==20.x
+pandas
+yfinance
+feedparser
+requests
+pytz
+flask
+gunicorn
